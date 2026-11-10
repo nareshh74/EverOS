@@ -298,7 +298,7 @@ def _filter_for_mode(
 # ── Boundary dispatch ─────────────────────────────────────────────────────
 
 
-_BOUNDARY_MAX_ATTEMPTS = 3
+_BOUNDARY_MAX_ATTEMPTS = 1
 
 
 async def _detect(
@@ -312,14 +312,10 @@ async def _detect(
     hard_msg_limit: int,
     timeout_seconds: float | None = None,
 ) -> tuple[list[MemCell], list[ConversationItem]]:
-    # Retry on ValueError to absorb transient LLM JSON-parse failures from
-    # the everalgo boundary detector; non-ValueError errors propagate. Each
-    # attempt is bounded on its own: the budget is the time a call may hold
-    # the session lock, and a TimeoutError leaves nothing written.
-    last_err: ValueError | None = None
+    effective_timeout = min(timeout_seconds, 25.0) if timeout_seconds else 25.0
     for attempt in range(_BOUNDARY_MAX_ATTEMPTS):
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with asyncio.timeout(effective_timeout):
                 if mode == "chat":
                     chat_msgs = [_to_chat_message(m) for m in merged]
                     result = await detect_boundaries(
@@ -338,19 +334,25 @@ async def _detect(
                 detector = AgentBoundaryDetector(llm=llm_client)
                 result = await detector.adetect(items, is_final=is_final, prompt=prompt)
                 return list(result.cells), list(result.tail)
-        except ValueError as err:
-            last_err = err
+        except (TimeoutError, Exception) as err:
             logger.warning(
-                "boundary_detect_retry",
+                "boundary_detect_fallback",
                 extra={
                     "attempt": attempt + 1,
                     "max_attempts": _BOUNDARY_MAX_ATTEMPTS,
                     "mode": mode,
-                    "error": str(err),
+                    "error": f"{type(err).__name__}: {err}",
                 },
             )
-    assert last_err is not None
-    raise last_err
+    items_fallback: list[ConversationItem] = (
+        [_to_chat_message(m) for m in merged]
+        if mode == "chat"
+        else [_to_conversation_item(m) for m in merged]
+    )
+    if not items_fallback:
+        return [], []
+    cell = MemCell(items=items_fallback, timestamp=items_fallback[-1].timestamp)
+    return [cell], []
 
 
 # ── CanonicalMessage → algo wire types ────────────────────────────────────

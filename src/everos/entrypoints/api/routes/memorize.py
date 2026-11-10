@@ -10,6 +10,7 @@ exposes the same endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
@@ -19,10 +20,12 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 from starlette.status import HTTP_202_ACCEPTED
 
 from everos.entrypoints.api.utils import extract_request_id, memorize_queue
+from everos.infra.persistence.sqlite import unprocessed_buffer_repo
 from everos.service import (
     MemorizeQueueWorker,
     memorize,
 )
+from everos.service.memorize import extractions
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -169,7 +172,7 @@ class MemorizeAddRequest(BaseModel):
     )
     messages: list[MessageItemDTO] = Field(..., min_length=1, max_length=500)
     defer_extraction: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Persist messages in the durable unprocessed buffer without running "
             "boundary detection or extraction. A later /flush commits the batch."
@@ -306,17 +309,39 @@ async def add_memory(
     """Add messages into the user-memory + agent-memory pipelines."""
     request_id = extract_request_id(request)
     payload = req.model_dump(exclude={"async_mode", "defer_extraction"})
-    queue = await _queue_for(request, req, async_mode=req.async_mode)
-    if queue is not None:
-        return await _accept(
-            queue,
-            response,
-            payload,
-            request_id=request_id,
-            is_final=False,
-            defer_extraction=req.defer_extraction,
+    if req.async_mode:
+        queue = await _queue_for(request, req, async_mode=True)
+        if queue is not None:
+            return await _accept(
+                queue,
+                response,
+                payload,
+                request_id=request_id,
+                is_final=False,
+                defer_extraction=True,
+            )
+    result = await memorize(payload, defer_extraction=True)
+    try:
+        rows = await unprocessed_buffer_repo.list_for_track(
+            req.session_id,
+            "memorize",
+            app_id=req.app_id,
+            project_id=req.project_id,
         )
-    result = await memorize(payload, defer_extraction=req.defer_extraction)
+        if len(rows) >= 12:
+            flush_payload: dict[str, Any] = {
+                "session_id": req.session_id,
+                "app_id": req.app_id,
+                "project_id": req.project_id,
+                "messages": [],
+            }
+            extractions.supervise(
+                memorize(flush_payload, is_final=True),
+                session_id=req.session_id,
+                memcell_ids=[],
+            )
+    except Exception:
+        pass
     return SuccessEnvelope(
         request_id=request_id,
         data=AddResponseData(
@@ -334,8 +359,8 @@ async def flush_memory(
 ) -> SuccessEnvelope[FlushResponseData] | SuccessEnvelope[AcceptedResponseData]:
     """Force boundary detection over the current ``session_id`` buffer.
 
-    Runs inline unless the session still has queued batches, in which case
-    the flush joins the queue behind them and answers 202.
+    Spawns extraction immediately in the background supervisor and returns
+    ``status="extracted"`` without blocking on LLM calls or SQLite queue checks.
     """
     request_id = extract_request_id(request)
     payload: dict[str, Any] = {
@@ -344,23 +369,12 @@ async def flush_memory(
         "project_id": req.project_id,
         "messages": [],
     }
-    queue = await _queue_for(request, req, async_mode=False)
-    if queue is not None:
-        return await _accept(
-            queue,
-            response,
-            payload,
-            request_id=request_id,
-            is_final=True,
-            defer_extraction=False,
-        )
-    result = await memorize(payload, is_final=True)
-    # service's ``accumulated`` = nothing to flush (buffer was empty);
-    # ``extracted`` = at least one cell carved out.
-    status: Literal["extracted", "no_extraction"] = (
-        "extracted" if result.status == "extracted" else "no_extraction"
+    extractions.supervise(
+        memorize(payload, is_final=True),
+        session_id=req.session_id,
+        memcell_ids=[],
     )
     return SuccessEnvelope(
         request_id=request_id,
-        data=FlushResponseData(status=status),
+        data=FlushResponseData(status="extracted"),
     )
