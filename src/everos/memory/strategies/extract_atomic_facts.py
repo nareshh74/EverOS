@@ -12,9 +12,9 @@ from __future__ import annotations
 from everalgo.user_memory import AtomicFactExtractor
 
 from everos.component.llm import get_llm_client
-from everos.component.utils.datetime import from_timestamp, to_iso_format
+from everos.component.utils.datetime import from_timestamp, to_iso_format, today_with_timezone
 from everos.core.observability.logging import get_logger
-from everos.core.persistence import MemoryRoot
+from everos.core.persistence import EntryId, MemoryRoot
 from everos.infra.ome.context import StrategyContext
 from everos.infra.ome.decorator import offline_strategy
 from everos.infra.ome.triggers import Immediate
@@ -72,8 +72,27 @@ async def extract_atomic_facts(event: EpisodeExtracted, ctx: StrategyContext) ->
     # 3. Write all facts in one batched append.
     writer = _get_writer()
     items = [_atomic_fact_to_entry_body(f) for f in facts]
+    ts_date = (
+        from_timestamp(event.episode_timestamp_ms).date()
+        if isinstance(event.episode_timestamp_ms, (int, float))
+        and event.episode_timestamp_ms > 0
+        else None
+    )
+    try:
+        ep_id_date = EntryId.parse(event.episode_entry_id).date
+    except Exception:
+        ep_id_date = None
+    af_date = (
+        ts_date
+        if ts_date is not None and (ep_id_date is None or ep_id_date == ts_date)
+        else today_with_timezone()
+    )
     await writer.append_entries(
-        event.owner_id, items, app_id=event.app_id, project_id=event.project_id
+        event.owner_id,
+        items,
+        date=af_date,
+        app_id=event.app_id,
+        project_id=event.project_id,
     )
 
     logger.info(

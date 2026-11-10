@@ -138,7 +138,14 @@ class AtomicFactRecaller:
             score = (
                 cosine_score_from_distance(r.get("_distance")) if query_vector else 0.0
             )
+            fact_app = r.get("app_id")
+            fact_owner = r.get("owner_id")
+            owner_tok = f"_{fact_owner}_" if isinstance(fact_owner, str) and fact_owner else None
             for ep_id in parent_to_eps.get(fact_parent_id, ()):
+                if fact_app and owner_tok and owner_tok in ep_id:
+                    ep_app = ep_id.split(owner_tok, 1)[0]
+                    if ep_app != fact_app:
+                        continue
                 buckets[ep_id].append(
                     FactCandidate(
                         id=fid,

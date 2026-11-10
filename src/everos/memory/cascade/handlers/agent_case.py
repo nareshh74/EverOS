@@ -71,7 +71,7 @@ class AgentCaseHandler(BaseDailyLogHandler):
         intent_tokens = self._deps.tokenizer.tokenize(task_intent)
         approach_tokens = self._deps.tokenizer.tokenize(approach)
         return AgentCase(
-            id=f"{owner_id}_{entry.entry_id}",
+            id=f"{owner_id}_{entry.entry_id}" if app_id == "default" else f"{app_id}_{owner_id}_{entry.entry_id}",
             entry_id=entry.entry_id,
             owner_id=owner_id,
             owner_type=owner_type,

@@ -21,7 +21,7 @@ from everalgo.types import Episode as AlgoEpisode
 from everalgo.types import MemCell as AlgoMemCell
 from everalgo.user_memory import EpisodeExtractor
 
-from everos.component.utils.datetime import from_timestamp, to_iso_format
+from everos.component.utils.datetime import from_timestamp, to_iso_format, today_with_timezone
 from everos.config import resolve_root
 from everos.core.observability.logging import get_logger
 from everos.core.observability.tracing import capture_output, memory_span
@@ -146,6 +146,11 @@ class UserMemoryPipeline:
                     parent_id=memcell_id,
                 )
                 inline, sections = _episode_to_entry_body(ep)
+                ep_date = (
+                    from_timestamp(ep.timestamp).date()
+                    if isinstance(ep.timestamp, (int, float)) and ep.timestamp > 0
+                    else today_with_timezone()
+                )
                 with memory_span(
                     "everos.persist.markdown",
                     observation_type="span",
@@ -160,6 +165,7 @@ class UserMemoryPipeline:
                         ep.owner_id,
                         inline=inline,
                         sections=sections,
+                        date=ep_date,
                         app_id=ingested.app_id,
                         project_id=ingested.project_id,
                     )
