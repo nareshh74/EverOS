@@ -19,7 +19,7 @@ import json
 from typing import Any
 
 from everos.core.observability.logging import get_logger
-from everos.infra.persistence.index import primary_key, user_profile_repo
+from everos.infra.persistence.index import eq, primary_key, user_profile_repo
 
 from ..dto import SearchProfileItem
 
@@ -40,9 +40,17 @@ class ProfileRecaller:
         """
         if not owner_id:
             return []
-        row = await user_profile_repo.find_one_where(
-            primary_key(app_id, project_id, owner_id)
-        )
+        if app_id in ("*", "shared", "all"):
+            where = (
+                eq("owner_id", owner_id)
+                if project_id in ("*", "shared", "all", "default")
+                else primary_key("default", project_id, owner_id)
+            )
+            row = await user_profile_repo.find_one_where(where)
+        else:
+            row = await user_profile_repo.find_one_where(
+                primary_key(app_id, project_id, owner_id)
+            )
         if row is None:
             logger.debug("profile_fetch_miss", owner_id=owner_id)
             return []
