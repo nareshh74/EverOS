@@ -335,6 +335,7 @@ class MemoryService:
         request_id: str,
         app_id: str = "default",
         project_id: str = "default",
+        background: bool = False,
     ) -> FlushResult | Queued:
         """Run one ``/flush`` inline, or queue it behind the session's backlog.
 
@@ -349,6 +350,13 @@ class MemoryService:
             return await self._queue_request(
                 payload, request_id=request_id, is_final=True, defer_extraction=False
             )
+        if background:
+            self._extractions.supervise(
+                self._memorize(payload, is_final=True),
+                session_id=session_id,
+                memcell_ids=[],
+            )
+            return FlushResult(status="extracted")
         return await self._flush_inline(
             session_id=session_id, app_id=app_id, project_id=project_id
         )
