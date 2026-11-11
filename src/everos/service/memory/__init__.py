@@ -300,7 +300,33 @@ class MemoryService:
                 is_final=False,
                 defer_extraction=defer_extraction,
             )
-        return await self._memorize(payload, defer_extraction=defer_extraction)
+        result = await self._memorize(payload, defer_extraction=defer_extraction)
+        if defer_extraction:
+            await self._maybe_auto_flush(payload)
+        return result
+
+    async def _maybe_auto_flush(self, payload: dict[str, Any]) -> None:
+        """Spawn a supervised background flush when a deferred session buffer
+        reaches 12 messages."""
+        try:
+            from everos.memory.ports import SessionKey
+
+            session_id = payload["session_id"]
+            app_id = payload.get("app_id", "default")
+            project_id = payload.get("project_id", "default")
+            rows = await self._stores.session_buffer.list(
+                SessionKey(app_id=app_id, project_id=project_id, session_id=session_id)
+            )
+            if len(rows) >= 12:
+                self._extractions.supervise(
+                    self._memorize(
+                        flush_payload(session_id, app_id, project_id), is_final=True
+                    ),
+                    session_id=session_id,
+                    memcell_ids=[],
+                )
+        except Exception:
+            pass
 
     async def flush(
         self,
