@@ -21,7 +21,7 @@ __all__ = [
 from collections.abc import Sequence
 from typing import Literal
 
-from everalgo.boundary import DetectionResult
+from .detection import DetectionResult
 from everalgo.types import (
     ChatMessage,
     ConversationItem,

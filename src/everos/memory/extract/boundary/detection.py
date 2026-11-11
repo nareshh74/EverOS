@@ -5,7 +5,7 @@ the user-memory pipeline and, in agent mode, the agent-memory pipeline. It
 also owns the ``memcell`` ledger: each cell gets exactly one row, whatever
 the mode, and both pipelines reference that row's ``memcell_id``.
 
-Both modes run :func:`everalgo.boundary.adetect_boundaries` over one buffer
+Both modes run boundary detection over one buffer
 track. Chat mode first drops tool rows; agent mode keeps them, and the
 algorithm keeps them in the cells without showing them to the model.
 Switching mode needs a fresh process (``settings.memorize.mode``).
@@ -20,9 +20,59 @@ import uuid
 from collections.abc import Sequence
 from typing import Literal, NamedTuple
 
-from everalgo.boundary import DetectionResult, adetect_boundaries
+import everalgo.boundary as _eb
 from everalgo.llm import LLMClient, LLMOutputError
-from everalgo.types import MemCell
+from everalgo.types import ConversationItem, MemCell
+
+if hasattr(_eb, "DetectionResult") and hasattr(_eb, "adetect_boundaries"):
+    DetectionResult = _eb.DetectionResult  # type: ignore[attr-defined]
+    adetect_boundaries = _eb.adetect_boundaries  # type: ignore[attr-defined]
+else:
+    from everalgo.boundary import BoundaryDetector, to_memcells
+
+    class DetectionResult(NamedTuple):
+        cells: list[MemCell]
+        tail: list[ConversationItem]
+        tail_complete: bool | None = None
+
+    async def adetect_boundaries(
+        items: Sequence[ConversationItem],
+        *,
+        llm: LLMClient,
+        is_final: bool = False,
+        custom_instructions: str | None = None,
+        hard_token_limit: int = 65_536,
+        hard_msg_limit: int = 500,
+    ) -> DetectionResult:
+        if not any(getattr(item, "role", None) in ("user", "assistant") for item in items):
+            return DetectionResult(cells=[], tail=list(items), tail_complete=None)
+        import json as _json
+
+        tail_complete_box: list[bool] = [False]
+
+        class _CompatLLM:
+            async def achat(self, *, messages: object, response_format: object = None, **kw: object) -> str:
+                raw = await llm.achat(messages=messages, response_format=response_format, **kw)  # type: ignore[arg-type]
+                if isinstance(raw, str) and "tail_complete" in raw:
+                    try:
+                        parsed = _json.loads(raw)
+                        if isinstance(parsed, dict) and "tail_complete" in parsed:
+                            tail_complete_box[0] = bool(parsed.pop("tail_complete"))
+                            return _json.dumps(parsed)
+                    except Exception:
+                        pass
+                return raw
+
+        cuts = await BoundaryDetector(llm=_CompatLLM()).adetect_batch(  # type: ignore[arg-type]
+            items,
+            is_final=is_final,
+            custom_instructions=custom_instructions,
+            hard_token_limit=hard_token_limit,
+            hard_message_limit=hard_msg_limit,
+        )
+        cells = to_memcells(items, cuts)
+        tail = list(items[cuts.tail_start :])
+        return DetectionResult(cells=cells, tail=tail, tail_complete=tail_complete_box[0])
 
 from everos.config import BoundaryDetectionSettings
 from everos.core.observability.logging import get_logger
